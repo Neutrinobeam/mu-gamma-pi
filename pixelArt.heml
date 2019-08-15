@@ -1,0 +1,1316 @@
+<!DOCTYPE HTML>
+<html lang="en-US">
+<head>
+<meta charset='utf-8'>
+<style>
+	body {
+		margin: 0;
+		background-color: hsl(240,10%,20%);
+	}
+	#centerer {
+		width: 100%;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+	}
+	#palette {
+		width: 89%;
+		display: flex;
+		flex-flow: row wrap;
+		justify-content: center;
+		align-items: flex-start;
+	}
+	.swatch {
+		box-sizing: border-box;
+		flex: none;
+	}
+	#blockPreview {
+		display: none;
+		margin-top: 1em;
+		padding: 0.25em;
+		background-color: lightgrey;
+	}
+	#options {
+		width: 80%;
+		padding: 1em;
+		margin: 1em;
+		display: flex;
+		justify-content: center;
+		background-color: lightgrey;
+		text-align: center;
+	}
+	.suboptions {
+		flex: 1 0 10%;
+	}
+	#imageContainer {
+		width: 100%;
+		display: flex;
+		flex-flow: row nowrap;
+		justify-content: center;
+		align-items: center;
+	}
+	#targetSize {
+		width: 3em;
+		text-align: center;
+	}
+	#sourceImage, #fileSelector {
+		display: none;
+	}
+	button {
+		display: block;
+	}
+	#imageContainer > * {
+		flex: none;
+	}
+	#imageContainer > div {
+		flex: none;
+		margin: 1em;
+		padding: 0.5em;
+		background-color: lightgrey;
+		
+	}
+	canvas {
+		background-color: white;
+	}
+	#statsContainer {
+		margin: 1em;
+		display: none;
+	}
+	#statsContainer > div {
+		margin: 0.25em;
+		padding: 0.25em;
+		background-color: lightgrey;
+	}
+	#textContainer > div {
+		width: 90%;
+		background-color: whitesmoke;
+	}
+</style>
+<script>
+"use strict";
+
+Array.prototype.scalarProduct = function(s) {
+	return this.map(x => x * s);
+}
+
+Array.prototype.less = function(b) {
+	return this.map((a, n) => a - b[n]);
+}
+
+Array.prototype.offset = function(b) {
+	this.forEach((a, n, local) => local[n] = a + b[n]);
+}
+
+function findTargetDimensions(x, y, mapScale, mapSize) {
+	let r = y / x;
+	let landscape = (r <= 1);
+	r = (landscape) ? x / y : r;
+	let u = mapSize * mapScale; 
+	let v = mapSize * Math.floor(r * mapScale);
+	return (landscape) ? [v, u] : [u, v];
+}
+
+function computeTargetDimensionsAndFixCrop(mapScale, mapSize, cropPos1, cropPos2) {
+	const widthA = cropPos2.x - cropPos1.x;
+	const heightA = cropPos2.y - cropPos1.y;
+	const [widthB, heightB] = findTargetDimensions(widthA, heightA, mapScale, mapSize);
+	const r = Math.min(widthA / widthB, heightA / heightB);
+	const widthError = widthA - Math.floor(r * widthB);
+	const heightError = heightA - Math.floor(r * heightB);
+	const widthHalfError = Math.floor(widthError / 2);
+	const heightHalfError = Math.floor(heightError / 2);
+	return [widthB, 
+			heightB, 
+			{'x': cropPos1.x + widthHalfError, 'y': cropPos1.y + heightHalfError}, 
+			{'x': cropPos2.x + widthHalfError - widthError, 'y': cropPos2.y + heightHalfError - heightError}
+			];
+}
+
+function pixelizeImage(source, sourceWidth, widthOut, heightOut, cropPos1, cropPos2) {
+	let widthIn = cropPos2.x - cropPos1.x;
+	let heightIn = cropPos2.y - cropPos1.y;
+	let x_recip = widthIn / widthOut;
+	let y_recip = heightIn / heightOut;
+	let target = [];
+
+	let z_in = 0;
+	for (let y_out = 0; y_out < heightOut; y_out++) {
+		for (let x_out = 0; x_out < widthOut; x_out++) {
+			let z_out = x_out + y_out * widthOut;
+			let pixel_weight = 0;
+			let weights = 0;
+			let target_pixel = [0,0,0];
+			let y_in_mid = (y_out + 0.5) * y_recip + cropPos1.y;
+			let y_in_min = Math.floor(y_out * y_recip) + cropPos1.y;
+			let y_in_max = Math.ceil((y_out + 1) * y_recip) + cropPos1.y;
+			let x_in_mid = (x_out + 0.5) * x_recip + cropPos1.x;
+			let x_in_min = Math.floor(x_out * x_recip) + cropPos1.x;
+			let x_in_max = Math.ceil((x_out + 1) * x_recip) + cropPos1.x;
+			for (let y_in = y_in_min; y_in < y_in_max; y_in++) {
+				let dy = (y_in_mid - (y_in + 0.5)) / y_recip;
+				let dz = dy * dy;
+				for (let x_in = x_in_min; x_in < x_in_max; x_in++) {
+					let dx = (x_in_mid - (x_in + 0.5)) / x_recip;
+					dz += dx * dx;
+					if (dz >= 1) {
+						continue;
+					}
+					dz -= 1;
+					let pixel_weight = dz * dz;
+					let z_in = (x_in + y_in * sourceWidth) * 4;
+					if (source[z_in + 3] < 255) {
+						pixel_weight = pixel_weight * source[z_in + 3] / 250;
+					}
+					target_pixel.offset([source[z_in], source[z_in + 1], source[z_in + 2]].scalarProduct(pixel_weight / 255));
+					weights += pixel_weight; 
+				}
+			}
+			target[z_out] = target_pixel.scalarProduct(1 / weights);
+		}
+	}
+	return target;
+}
+
+const blockTypes = [
+	['Glass'],
+	['Grass Block', 'Slime Block'],
+	['Birch Planks', 'Sandstone', 'End Stone', 'End Stone Bricks', 'Bone Block', 'Glowstone', 'Sand'],
+	['Cobweb'],
+	['Redstone Block', 'TNT'],
+	['Packed Ice', 'Ice'],
+	['Iron Block'],
+	['Leaves'],
+	['White Wool', 'Snow Block', 'White Concrete', 'White Concrete Powder', 'White Glazed Terracotta'],
+	['Clay Block'],
+	['Dirt', 'Granite', 'Jungle Planks'],
+	['Cobblestone', 'Andesite', 'Stone', 'Stone Brick', 'Gravel'],
+	['Water'],
+	['Oak Planks', 'Crafting Table', 'Bookshelves'],
+	['Diorite', 'Quartz', 'Sea Lanterns'],
+	['Acacia Planks', 'Orange Wool', 'Pumpkin Block', 'Orange Concrete', 'Orange Concrete Powder', 'Red Sand', 'Red SandStone', 'Terracotta', 'Orange Glazed Terracotta'],
+	['Magenta Wool', 'Magenta Concrete', 'Magenta Concrete Powder', 'Magenta Glazed Terracotta', 'Purpur Block'],
+	['Light Blue Wool', 'Light Blue Concrete', 'Light Blue Concrete Powder', 'Light Blue Glazed Terracotta'],
+	['Hay Bale', 'Sponge', 'Yellow Wool', 'Yellow Concrete', 'Yellow Concrete Powder', 'Yellow Glazed Terracotta'],
+	['Melon', 'Lime Wool', 'Lime Concrete', 'Lime Concrete Powder', 'Lime Glazed Terracotta'],
+	['Pink Wool', 'Pink Concrete', 'Pink Concrete Powder', 'Pink Glazed Terracotta'],
+	['Gray Wool', 'Gray Concrete', 'Gray Concrete Powder', 'Gray Glazed Terracotta'],
+	['Light Gray Wool', 'Light Gray Concrete', 'Light Gray Concrete Powder', 'Light Gray Glazed Terracotta'],
+	['Prismarine (Block)', 'Cyan Wool', 'Cyan Concrete', 'Cyan Concrete Powder', 'Cyan Glazed Terracotta'],
+	['Purple Wool', 'Purple Concrete', 'Purple Concrete Powder', 'Purple Glazed Terracotta', 'Mycelium'],
+	['Blue Wool', 'Blue Concrete', 'Blue Concrete Powder', 'Blue Glazed Terracotta'],
+	['Dark Oak Planks', 'Brown Wool', 'Brown Concrete', 'Brown Concrete Powder', 'Brown Glazed Terracotta', 'Soul Sand'],
+	['Green Wool', 'Green Concrete', 'Green Concrete Powder', 'Green Glazed Terracotta'],
+	['Red Wool', 'Bricks', 'Red Concrete', 'Red Concrete Powder', 'Red Glazed Terracotta', ' Nether Wart Block'],
+	['Black Wool', 'Coal Block', 'Obsidian', 'Black Concrete', 'Black Concrete Powder', 'Black Glazed Terracotta'],
+	['Gold Block'],
+	['Diamond Block', 'Prismarine Bricks', 'Dark Prismarine'],
+	['Lapis Block'],
+	['Emerald Block'],
+	['Spruce Planks'],
+	['Netherrack', 'Nether Bricks', 'Magma Block'],
+	['White Terracotta'],
+	['Orange Terracotta'],
+	['Magenta Terracotta'],
+	['Light Blue Terracotta'],
+	['Yellow Terracotta'],
+	['Lime Terracotta'],
+	['Pink Terracotta'],
+	['Gray Terracotta'],
+	['Light Gray Terracotta'],
+	['Cyan Terracotta'],
+	['Purple Terracotta'],
+	['Blue Terracotta'],
+	['Brown Terracotta'],
+	['Green Terracotta'],
+	['Red Terracotta'],
+	['Black Terracotta']
+];
+
+const schematicData = [
+	{'name': 'glass', 'id': 0},
+	{'name': 'ait', 'id': 1},
+	{'name': 'bedrock', 'id': 2},
+	{'name': 'grass_block', 'id': 10},
+	{'name': 'slime_block', 'id': 11},
+	{'name': 'birch_planks', 'id': 20},
+	{'name': 'sandstone', 'id': 21},
+	{'name': 'end_stone', 'id': 22},
+	{'name': 'bone_block', 'id': 23},
+	{'name': 'glowstone', 'id': 24},
+	{'name': 'sand', 'id': 26},
+	{'name': 'cobweb', 'id': 30},
+	{'name': 'redstone_block', 'id': 40},
+	{'name': 'tnt', 'id': 41},
+	{'name': 'packed_ice', 'id': 50},
+	{'name': 'ice', 'id': 51},
+	{'name': 'iron_block', 'id': 60},
+	{'name': 'oak_leaves', 'id': 70},
+	{'name': 'white_wool', 'id': 80},
+	{'name': 'snow_block', 'id': 81},
+	{'name': 'white_concrete', 'id': 82},
+	{'name': 'white_concrete_powder', 'id': 83},
+	{'name': 'white_glazed_terracotta', 'id': 84},
+	{'name': 'clay', 'id': 90},
+	{'name': 'dirt', 'id': 100},
+	{'name': 'granite', 'id': 101},
+	{'name': 'jungle_planks', 'id': 102},
+	{'name': 'cobblestone', 'id': 110},
+	{'name': 'andesite', 'id': 111},
+	{'name': 'stone', 'id': 112},
+	{'name': 'stone_bricks', 'id': 113},
+	{'name': 'gravel', 'id': 114},
+	{'name': 'water', 'id': 120},
+	{'name': 'oak_planks', 'id': 130},
+	{'name': 'crafting_table', 'id': 131},
+	{'name': 'bookshelf', 'id': 132},
+	{'name': 'diorite', 'id': 140},
+	{'name': 'quartz_block', 'id': 142},
+	{'name': 'sea_lantern', 'id': 143},
+	{'name': 'acacia_planks', 'id': 150},
+	{'name': 'orange_wool', 'id': 151},
+	{'name': 'pumpkin', 'id': 152},
+	{'name': 'orange_concrete', 'id': 153},
+	{'name': 'orange_concrete_powder', 'id': 154},
+	{'name': 'red_sand', 'id': 155},
+	{'name': 'red_sandstone', 'id': 156},
+	{'name': 'terracotta', 'id': 157},
+	{'name': 'orange_glazed_terracotta', 'id': 158},
+	{'name': 'magenta_wool', 'id': 160},
+	{'name': 'magenta_concrete', 'id': 161},
+	{'name': 'magenta_concrete_powder', 'id': 162},
+	{'name': 'magenta_glazed_terracotta', 'id': 163},
+	{'name': 'purpur_block', 'id': 164},
+	{'name': 'light_blue_wool', 'id': 170},
+	{'name': 'light_blue_concrete', 'id': 171},
+	{'name': 'light_blue_concrete_powder', 'id': 172},
+	{'name': 'light_blue_glazed_terracotta', 'id': 173},
+	{'name': 'hay_block', 'id': 180},
+	{'name': 'sponge', 'id': 181},
+	{'name': 'yellow_wool', 'id': 182},
+	{'name': 'yellow_concrete', 'id': 183},
+	{'name': 'yellow_concrete_powder', 'id': 184},
+	{'name': 'yellow_glazed_terracotta', 'id': 185},
+	{'name': 'melon', 'id': 190},
+	{'name': 'lime_wool', 'id': 191},
+	{'name': 'lime_concrete', 'id': 192},
+	{'name': 'lime_concrete_powder', 'id': 193},
+	{'name': 'lime_glazed_terracotta', 'id': 194},
+	{'name': 'pink_wool', 'id': 200},
+	{'name': 'pink_concrete', 'id': 201},
+	{'name': 'pink_concrete_powder', 'id': 202},
+	{'name': 'pink_glazed_terracotta', 'id': 203},
+	{'name': 'gray_wool', 'id': 210},
+	{'name': 'gray_concrete', 'id': 211},
+	{'name': 'gray_concrete_powder', 'id': 212},
+	{'name': 'gray_glazed_terracotta', 'id': 213},
+	{'name': 'light_gray_wool', 'id': 220},
+	{'name': 'light_gray_concrete', 'id': 221},
+	{'name': 'light_gray_concrete_powder', 'id': 222},
+	{'name': 'light_gray_glazed_terracotta', 'id': 223},
+	{'name': 'prismarine', 'id': 230},
+	{'name': 'cyan_wool', 'id': 231},
+	{'name': 'cyan_concrete', 'id': 232},
+	{'name': 'cyan_conrete_powder', 'id': 233},
+	{'name': 'cyan_glazed_terracotta', 'id': 234},
+	{'name': 'purple_wool', 'id': 240},
+	{'name': 'purple_concrete', 'id': 241},
+	{'name': 'purple_concrete_powder', 'id': 242},
+	{'name': 'purple_glazed_terracotta', 'id': 243},
+	{'name': 'mycelium', 'id': 244},
+	{'name': 'blue_wool', 'id': 250},
+	{'name': 'blue_concrete', 'id': 251},
+	{'name': 'blue_concrete_powder', 'id': 252},
+	{'name': 'blue_glazed_terracotta', 'id': 253},
+	{'name': 'dark_oak_planks', 'id': 260},
+	{'name': 'brown_wool', 'id': 261},
+	{'name': 'brown_concrete', 'id': 262},
+	{'name': 'brown_concrete_powder', 'id': 263},
+	{'name': 'brown_glazed_terracotta', 'id': 264},
+	{'name': 'soul_sand', 'id': 265},
+	{'name': 'green_wool', 'id': 270},
+	{'name': 'green_concrete', 'id': 271},
+	{'name': 'green_concrete_powder', 'id': 272},
+	{'name': 'green_glazed_terracotta', 'id': 273},
+	{'name': 'red_wool', 'id': 280},
+	{'name': 'bricks', 'id': 281},
+	{'name': 'red_concrete', 'id': 282},
+	{'name': 'red_concrete_powder', 'id': 283},
+	{'name': 'red_glazed_terracotta', 'id': 284},
+	{'name': 'nether_wart_block', 'id': 285},
+	{'name': 'black_wool', 'id': 290},
+	{'name': 'coal_block', 'id': 291},
+	{'name': 'obsidian', 'id': 292},
+	{'name': 'black_concrete', 'id': 293},
+	{'name': 'black_concrete_powder', 'id': 294},
+	{'name': 'black_glazed_terracotta', 'id': 295},
+	{'name': 'gold_block', 'id': 300},
+	{'name': 'diamond_block', 'id': 310},
+	{'name': 'prismarine_bricks', 'id': 311},
+	{'name': 'dark_prismarine', 'id': 312},
+	{'name': 'lapis_block', 'id': 320},
+	{'name': 'emerald_block', 'id': 330},
+	{'name': 'spruce_planks', 'id': 340},
+	{'name': 'netherrack', 'id': 350},
+	{'name': 'netherbricks', 'id': 351},
+	{'name': 'magma_block', 'id': 352},
+	{'name': 'white_terracotta', 'id': 360},
+	{'name': 'orange_terracotta', 'id': 370},
+	{'name': 'magenta_terracotta', 'id': 380},
+	{'name': 'light_blue_terracotta', 'id': 390},
+	{'name': 'yellow_terracotta', 'id': 400},
+	{'name': 'lime_terracotta', 'id': 410},
+	{'name': 'pink_terracotta', 'id': 420},
+	{'name': 'gray_terracotta', 'id': 430},
+	{'name': 'light_gray_terracotta', 'id': 440},
+	{'name': 'cyan_terracotta', 'id': 450},
+	{'name': 'purple_terracotta', 'id': 460},
+	{'name': 'blue_terracotta', 'id': 470},
+	{'name': 'brown_terracotta', 'id': 480},
+	{'name': 'green_terracotta', 'id': 490},
+	{'name': 'red_terracotta', 'id': 500},
+	{'name': 'black_terracotta', 'id': 510},
+];
+
+const defaultIncludes = [
+	false, true, true, false, false, 
+	false, false, false, true, false, 
+	true, true, false, true, true,
+	true, true, true, true, true,
+	true, false, true, false, false,
+	false, true, true, true, false,
+	false, false, false, false, true,
+	false, false, false, false, false,
+	false, false, false, false, false,
+	false, false, false, false, false,
+	false, false];
+	
+let includes = [false];
+	
+const rawColors = [
+	[-1,-1,-1], 
+	[127,178,56], [247,233,163], [199,199,199], [255,0,0], [160,160,255], 
+	[167,167,167], [0,124,0], [255,255,255], [164,168,184], [151,109,77], 
+	[112,112,112], [64,64,255], [143,119,72], [255,252,245], [216,127,51], 
+	[178,76,216], [102,153,216], [229,229,51], [127,204,25], [242,127,165], 
+	[76,76,76], [153,153,153], [76,127,153], [127,63,178], [51,76,178], 
+	[102,76,51], [102,127,51], [153,51,51], [25,25,25], [250,238,77],
+	[92,219,213], [74,128,255], [0,217,58], [129,86,49], [112,2,0],
+	[209,177,161], [159,82,36], [149,87,108], [112,108,138], [186,133,36],
+	[103,117,53], [160,77,78], [57,41,35], [135,107,98], [87,92,92],
+	[122,73,88], [76,62,92], [76,50,35], [76,82,42], [142,60,46], 
+	[37,22,16]
+];
+
+const shadeCoeffs = [180, 220, 255];
+
+function coordinateSort(index) {
+	return (a, b) => a.vector[index] - b.vector[index];
+}
+
+function createKDTree(inclusion, staircase, vectorTransform, distanceF = undefined) {
+
+	const packedVectors = rawColors.reduce((acc, c, n) => {
+		if (n === 0 || !inclusion.includes(n)) {
+			return acc;
+		}
+		acc.push({'color': c.scalarProduct(shadeCoeffs[1] / 65025), 'id': 4 * n + 1});
+		if (staircase) {
+			acc.push({'color': c.scalarProduct(shadeCoeffs[0] / 65025), 'id': 4 * n});
+			acc.push({'color': c.scalarProduct(shadeCoeffs[2] / 65025), 'id': 4 * n + 2});
+		}
+		return acc;
+	}, []);
+	
+	return SpecializedKDTree(packedVectors, vectorTransform, distanceF);
+}
+
+function SpecializedKDTree(packed, vectorTransform, distanceF) {
+
+	function makeNode(pack, leftChild, rightChild) {
+		return {
+			'color': pack.color,
+			'vector': pack.vector,
+			'id': pack.id,
+			'left': leftChild,
+			'right': rightChild
+		}
+	};
+	
+	function buildSpecializedKDTree(values, depth = 0) {
+		const axis = depth % values[0].vector.length;
+		const sorted = values.sort(coordinateSort(axis));
+		switch(sorted.length) {
+		case 1:
+			return makeNode(sorted[0], null, null);
+		case 2:
+			return makeNode(sorted[1], makeNode(sorted[0], null, null), null);
+		default:
+			const median = Math.floor(sorted.length / 2);
+			const leftIDs = sorted.filter((_, n) => n < median);
+			const rightIDs = sorted.filter((_, n) => n > median);
+			return makeNode(sorted[median], buildSpecializedKDTree(leftIDs, depth + 1), buildSpecializedKDTree(rightIDs, depth + 1))
+		}
+	}
+
+	function KDdistance(A, B, axis = -1) {
+		return (axis === -1) ? A.reduce((s, a, n) => s + (a - B[n]) * (a - B[n]), 0) : (A[axis] - B[axis]) * (A[axis] - B[axis]);
+	}
+	
+	packed.forEach(x => x.vector = vectorTransform(x.color));
+
+	return {
+		'root': buildSpecializedKDTree(packed),
+		'transform': vectorTransform,
+		'getKDDistance': (distanceF === undefined) ? KDdistance : distanceF,
+		
+		'findNearest': function(color) {
+			return this.findNearestDo(this.root, this.transform(color), this.root, 0);
+		},
+		
+		'findNearestDo': function(currentNode, vector, bestNode, depth) {
+			const thisDistance = this.getKDDistance(currentNode.vector, vector);
+			const lastDistance = this.getKDDistance(bestNode.vector, vector);
+			bestNode = (thisDistance < lastDistance) ? currentNode : bestNode;
+
+			const axis = depth % vector.length;
+			let firstBranch;
+			let secondBranch;
+			if (vector[axis] < currentNode.vector[axis]) {
+				firstBranch = currentNode.left;
+				secondBranch = currentNode.right;
+			}
+			else {
+				firstBranch = currentNode.right;
+				secondBranch = currentNode.left;
+			}
+			bestNode = (firstBranch !== null) ? this.findNearestDo(firstBranch, vector, bestNode, depth + 1) : bestNode;
+			if (secondBranch !== null) {
+				const splittingDistance = this.getKDDistance(currentNode.vector, vector, axis);
+				const searchDistance = this.getKDDistance(bestNode.vector, vector);
+				bestNode = (splittingDistance < searchDistance) ? this.findNearestDo(secondBranch, vector, bestNode, depth + 1) : bestNode;
+			}
+			return bestNode;
+		}
+	}
+}
+
+function splitIds(array, width, staircase) {
+	let bases = [];
+	let gradients = [];
+	let norths = [];
+	array.forEach((id, n) => 
+	{
+		let r = id % 4;
+		bases[n] = (id - r) / 4;
+		gradients[n] = r - 1;
+	});
+	if (!staircase) {
+		return [bases, gradients, undefined];
+	}
+	for (let x = 0; x < width; x += 1) {
+		norths[x] = 0;
+		let last_up = -1;
+		let start_down = -1;
+		let offset = 0;
+		let descending = false;
+		for (let z = x; z < array.length; z += width) {
+			let grad = gradients[z];
+			if (descending && (grad === 1 || z + width >= array.length)) {
+				let shift_at = (offset > 0) ? start_down : last_up;
+				if (last_up === -1) {
+					if (grad === 1) {
+						norths[x] -= offset;
+					}
+					else { // End of col
+						norths[x] -= offset + grad;
+					}
+				}
+				else {
+					if (grad === 1) {
+						gradients[shift_at] -= offset;
+					}
+					else { // End of col
+						gradients[shift_at] -= offset + grad;
+					}
+				}
+				offset = 1;
+				descending = false;
+			}
+			else {
+				offset += grad;
+				if (!descending && grad === -1) {
+					start_down = z;
+					descending = true;
+				}
+			}
+			if (grad === 1) {
+				last_up = z;
+			}
+		}
+	}
+	return [bases, gradients, norths];
+}
+
+function fixHeightMap(grads, norths, width) {
+	if (norths === undefined) {
+		return grads;
+	}
+	for (let x = 0; x < width; x++) {
+		grads[x] += norths[x];
+		for (let z = x + width; z < grads.length; z += width) {
+			grads[z] += grads[z - width];
+		}
+	}
+	return grads;
+}
+
+function approximateImage(pixels, searchable, width, dither) {
+	if (!dither) {
+		return pixels.map(z => searchable.findNearest(z).id);
+	}
+	const approx = new Array(pixels.length);
+	const ymax = pixels.length / width
+	for (let y = 0; y < ymax; y++) {
+		let ltr = (y % 2 === 0);
+		let dx = (ltr) ? 1 : -1;
+		let down = (y + 1 < ymax);
+		let xstart = (ltr) ? 0 : width - 1;
+		let xend = (ltr) ? width : -1;
+		for (let x = xstart; x !== xend; x += dx) {
+			let z = x + y * width;
+			let v = searchable.findNearest(pixels[z]);
+			approx[z] = v.id;
+			let u = pixels[z].less(v.color);
+			let left = (x !== 0);
+			let right = (x + 1 !== width);
+			if (down) {
+				pixels[z + width].offset(u.scalarProduct(5 / 48));
+				if (ltr && left || !ltr && right){
+					pixels[z + width - dx].offset(u.scalarProduct(3 / 48));
+				}
+			}
+			if (ltr && right || !ltr && left) {
+				pixels[z + dx].offset(u.scalarProduct(7 / 48));
+				if (down) {
+					pixels[z + width + dx].offset(u.scalarProduct(1 / 48));
+				}
+			}
+		}
+	}
+	return approx;
+}
+
+function createPalette() {
+	const tiles = document.getElementsByClassName('swatch');
+	const size = Math.floor(window.innerWidth / 20);
+	const n = tiles.length;
+	for (let k = 0; k < n; k++) {
+		let tile = tiles.item(k);
+		tile.style.width = size + 'px';
+		tile.style.height = size + 'px';
+		let id = +tile.id.substring(6);	
+		setSwatch(id, tile, defaultIncludes[id]);
+	}
+}
+
+function clickSwatch(tile) {
+	let id = +tile.id.substring(6);
+	setSwatch(id, tile, !includes[id]);
+}
+
+function setSwatch(id, tile, active) {
+	includes[id] = active;
+	let color = rawColors[id].scalarProduct(shadeCoeffs[1] / 255).map(x => Math.floor(x));
+	tile.style.backgroundColor = 'rgb(' + color[0] + ',' + color[1] + ',' + color[2] + ')';
+	tile.style.border = (active) ? '' : 'medium solid firebrick';
+}
+
+function previewSwatchBlocks(tile) {
+	const id = +tile.id.substring(6);
+	const textNode = document.createTextNode(blockTypes[id].join(', '));
+	const container = document.getElementById('blockPreview')
+	container.appendChild(textNode);
+	container.style.display = 'block';
+}
+
+function clearBlocks() {
+	const container = document.getElementById('blockPreview');
+	while (container.childNodes.length > 0) {
+		container.removeChild(container.firstChild);
+	}
+	container.style.display = 'none';
+}
+
+let cropHandles = [{'x': 0, 'y': 0}, {'x': 1, 'y': 1}];
+
+function setupDragging() {
+	let dragA = false;
+	let dragB = false;
+	let x = 0;
+	let y = 0;
+	let dx;
+	let dy;
+	const preview = document.getElementById('previewImage');
+	const source = document.getElementById('sourceImage');
+	
+	function startDrag(e) {
+		const rect = preview.getBoundingClientRect();
+		x = e.clientX - rect.left;
+		y = e.clientY - rect.top;
+		const ratioX = preview.width / source.width;
+		const ratioY = preview.height / source.height;
+		const dx1 = x - cropHandles[0].x * ratioX;
+		const dy1 = y - cropHandles[0].y * ratioY;
+		const dx2 = x - cropHandles[1].x * ratioX;
+		const dy2 = y - cropHandles[1].y * ratioY;
+		dragA = (dx1 * dx1 + dy1 * dy1 <= 400);
+		dragB = (dx2 * dx2 + dy2 * dy2 <= 400);
+		dx = (dragA) ? dx1 : (dragB) ? dx2 : 0;
+		dy = (dragA) ? dy1 : (dragB) ? dy2 : 0;
+		if (dragA || dragB) {
+			preview.addEventListener('mousemove', dragTo);
+		}
+	}
+	
+	function endDrag() {
+		if (dragA || dragB) {
+			preview.removeEventListener('mousemove', dragTo);
+		}
+		dragA = false;
+		dragB = false;
+	}
+	
+	function dragTo(e) {
+		const rect = preview.getBoundingClientRect();
+		const invRatioX = source.width / preview.width;
+		const invRatioY = source.height / preview.height;
+		x = Math.round((e.clientX - rect.left - dx) * invRatioX);
+		y = Math.round((e.clientY - rect.top - dy) * invRatioY);
+		const handle = (dragA) ? 0 : (dragB) ? 1 : -1;
+		let edge = false;
+		if (handle === -1) {
+			console.log('Error: Dragging unknown handle.');
+			endDrag();
+			return;
+		}
+		if (x < 0) {
+			cropHandles[handle].x = 0;
+			cropHandles[handle].y = y;
+			edge = true;
+		}
+		else if (y < 0) {
+			cropHandles[handle].x = x;
+			cropHandles[handle].y = 0;
+			edge = true;
+		}
+		else if(x >= source.width) {
+			cropHandles[handle].x = source.width - 1;
+			cropHandles[handle].y = y;
+			edge = true;
+		}
+		else if(y >= source.height) {
+			cropHandles[handle].x = x;
+			cropHandles[handle].y = source.height - 1;
+			edge = true;
+		}
+		if (!edge && dragA && x >= cropHandles[1].x - 20) {
+			cropHandles[0].x = cropHandles[1].x - 21;
+		}
+		if (!edge && dragA && y >= cropHandles[1].y - 20) {
+			cropHandles[0].y = cropHandles[1].y - 21;
+		}
+		if (!edge && dragB && x <= cropHandles[0].x + 20) {
+			cropHandles[1].x = cropHandles[0].x + 21;
+		}
+		if (!edge && dragB && y <= cropHandles[0].y + 20) {
+			cropHandles[1].y = cropHandles[0].y + 21;
+		}
+		if (edge) {
+			endDrag();
+		}
+		else {
+			cropHandles[handle].x = x;
+			cropHandles[handle].y = y;
+		}
+	refreshPreview();		
+	}
+
+	preview.addEventListener('mousedown', startDrag);
+	preview.addEventListener('mouseup', endDrag);
+};
+
+function fixCanvases() {
+	const canvasA = document.getElementById('previewImage');
+	const canvasB = document.getElementById('targetImage');
+	const size = Math.floor(window.innerWidth / 4);
+	canvasA.setAttribute('width', size);
+	canvasA.setAttribute('height', size);
+	canvasB.setAttribute('width', size);
+	canvasB.setAttribute('height', size);
+	canvasB.imageSmoothingEnabled = false;
+}
+
+function loadImage(files) {
+	if (files.length === 0) {
+		return;
+	}
+	const file = files[0];
+	const img = new Image();
+	const reader = new FileReader();
+	reader.onload = (x => 
+		(e) => {
+			x.src = e.target.result;
+			x.onload = onImageReady;
+		})(img);
+	reader.readAsDataURL(file);
+}
+
+function onImageReady(e) {
+	const img = e.target;
+	const previewWidth = Math.min(img.width, window.innerWidth / 2);
+	const previewHeight = Math.round(previewWidth * img.height / img.width);
+
+	const canvas = document.getElementById('sourceImage');
+	canvas.setAttribute('width', img.width);
+	canvas.setAttribute('height', img.height);
+	const context = canvas.getContext('2d');
+	context.drawImage(img, 0, 0);
+
+	cropHandles[0].x = 0;
+	cropHandles[0].y = 0;
+	cropHandles[1].x = img.width - 1;
+	cropHandles[1].y = img.height - 1;
+
+	const preview = document.getElementById('previewImage');
+	preview.setAttribute('width', previewWidth);
+	preview.setAttribute('height', previewHeight);
+	refreshPreview();
+	
+	setupDragging();
+	
+	document.getElementById('createButton').removeAttribute('disabled');
+	document.getElementById('targetSize').removeAttribute('disabled');
+}
+
+function makeCropRegion(x1, y1, x2, y2, x3, y3, x4, y4) {
+	const crop = new Path2D();
+	crop.rect(x1, y1, x2 - x1, y2 - y1);
+	crop.rect(x3, y3, x4 - x3, y4 - y3);
+	crop.closePath();
+	return crop;	
+}
+
+function refreshPreview() {
+	const source = document.getElementById('sourceImage');
+	const preview = document.getElementById('previewImage');
+	const context = preview.getContext('2d');
+
+	context.drawImage(source, 0, 0, source.width, source.height, 0, 0, preview.width, preview.height);
+
+	const mapScale = +document.getElementById('targetSize').value;
+	const cropA = cropHandles[0];
+	const cropB = cropHandles[1];
+	const [reducedWidth, reducedHeight, cropC, cropD] = computeTargetDimensionsAndFixCrop(mapScale, 128, cropHandles[0], cropHandles[1]);
+
+	const x_r = preview.width / source.width;
+	const y_r = preview.height / source.height;
+	const ax = Math.floor(cropA.x * x_r);
+	const ay = Math.floor(cropA.y * y_r);
+	const bx = Math.ceil(cropB.x * x_r);
+	const by = Math.ceil(cropB.y * y_r);
+	const cx = Math.floor(cropC.x * x_r);
+	const cy = Math.floor(cropC.y * y_r);
+	const dx = Math.ceil(cropD.x * x_r);
+	const dy = Math.ceil(cropD.y * y_r);
+	const hardCrop = makeCropRegion(0, 0, source.width, source.height, ax, ay, bx, by);
+	const softCrop = makeCropRegion(ax, ay, bx, by, cx, cy, dx, dy);
+
+	context.fillStyle = 'rgba(0, 0, 0, 0.8)';
+	context.fill(hardCrop, 'evenodd');
+	context.fillStyle = 'rgba(0, 0, 0, 0.4)';
+	context.fill(softCrop, 'evenodd');
+	context.fillStyle = 'orange';
+	const turn = 2 * Math.PI;
+	context.beginPath();
+	context.arc(ax, ay, 6, 0, turn);
+	context.arc(ax, ay, 14, 0, turn);
+	context.arc(ax, ay, 20, 0, turn);
+	context.closePath();
+	context.fill('evenodd')
+	context.beginPath();
+	context.arc(bx, by, 6, 0, turn);
+	context.arc(bx, by, 14, 0, turn);
+	context.arc(bx, by, 20, 0, turn);
+	context.closePath();
+	context.fill('evenodd')
+}
+
+let output;
+
+function createOutput() {
+	const mapScale = +document.getElementById('targetSize').value;
+	const source = document.getElementById('sourceImage');
+	const preview = document.getElementById('previewImage');
+	const target = document.getElementById('targetImage');
+	const globalInclude = document.getElementById('paletteOverride').checked;
+	const staircase = document.getElementById('stairMethod').checked;
+	const dither = document.getElementById('enableDithering').checked;
+	const ablColor = document.getElementById('colorSpace').checked
+	const [reducedWidth, reducedHeight, crop2, crop3] = computeTargetDimensionsAndFixCrop(mapScale, 128, cropHandles[0], cropHandles[1]);
+	const xFactor = Math.ceil((crop3.x - crop2.x) * preview.width / (reducedWidth * source.width));
+	const yFactor = Math.ceil((crop3.y - crop2.y) * preview.height / (reducedHeight * source.height));
+	const factor = Math.min(xFactor, yFactor);
+	target.width = reducedWidth * factor;
+	target.height = reducedHeight * factor;
+	const context = source.getContext('2d');
+	const sourceData = context.getImageData(0, 0, source.width, source.height);
+	const resampled = pixelizeImage(sourceData.data, sourceData.width, reducedWidth, reducedHeight, crop2, crop3);
+	const inclusion = includes.reduce((acc, x, n) => {
+		if (x || (n > 0 && globalInclude)) {
+			acc.push(n);
+		}
+		return acc;
+	}, []);
+	const rgbTransform = x => x;
+	const ablTransform = x => {
+		return [2 * x[0] - x[1] - x[2], Math.sqrt(3) * (x[1] - x[2]) / 2, (x[0] + x[1] + x[2]) / 3];	
+	};
+	const ablDistance = function(A, B, axis = -1) {
+		const weights = [1.0, 0.9, 0.8];
+		return (axis === -1) ? 
+			A.reduce((s, c, n) => s + weights[n] * (c - B[n]) * (c - B[n]), 0) : 
+			weights[axis] * (A[axis] - B[axis]) * (A[axis] - B[axis]);
+	};
+	const KDT = createKDTree(inclusion, staircase, (ablColor) ? ablTransform : rgbTransform, (ablColor) ? ablDistance : undefined);
+	const combinedMap = approximateImage(resampled, KDT, reducedWidth, dither);
+	const [idMap, grads, northRow] = splitIds(combinedMap, reducedWidth, staircase);
+	const heightMap = fixHeightMap(grads, northRow, reducedWidth);
+	const targetCtx = target.getContext('2d');
+	const targetData = targetCtx.createImageData(target.width, target.height);
+	for (let y = 0; y < reducedHeight; y++) {
+		for (let x = 0; x < reducedWidth; x++) {
+			let z = x + y * reducedWidth;
+			let shade = (!staircase) ? 1 : combinedMap[z] % 4;
+			let color = rawColors[idMap[z]].map(x => Math.floor(x * shadeCoeffs[shade] / 255));
+			for (let dx = 0; dx < factor; dx++) {
+				for (let dy = 0; dy < factor; dy++) {
+					z = 4 * (factor * x + dx + (factor * y + dy) * factor * reducedWidth);
+					targetData.data[z] = color[0];
+					targetData.data[z + 1] = color[1];
+					targetData.data[z + 2] = color[2];
+					targetData.data[z + 3] = 255;
+				}
+			}
+		}
+	}
+	targetCtx.putImageData(targetData, 0, 0);
+	const counts = idMap.reduce((acc, id) => {
+		if (!acc.hasOwnProperty(id)) {
+			acc[id] = 0;
+		}
+		acc[id]++;
+		return acc;
+	}, {});
+	displayStats(counts);
+	output = {'ids': idMap, 'heights': heightMap, 'exterior': northRow, 'width': reducedWidth, 'length': reducedHeight};
+}
+
+function displayStats(counts) {
+	const container = document.getElementById('statsContainer');
+	container.style.display = 'block';
+	while (container.childNodes.length > 0) {
+		container.removeChild(container.firstChild);
+	}
+	const f = new DocumentFragment();
+	Object.entries(counts).forEach(x => {
+		let [id, count] = x;
+		let substack = count % 64;
+		let stacks = (count - substack) / 64;
+		let d = document.createElement('div');
+		let text = (stacks > 1) ? stacks.toString() + ' Stacks & ' : (stacks === 1) ? stacks.toString() + ' Stack & ' : '';
+		text += substack + ' Blocks of ';
+		d.appendChild(document.createTextNode(text));
+		if (blockTypes[id].length === 1) {
+			d.appendChild(document.createTextNode(blockTypes[id][0]))
+		}
+		else {
+			blockTypes[id].forEach((name, k) => {
+			let e = document.createElement('input');
+			e.setAttribute('type', 'radio');
+			e.setAttribute('name', 'block' + id);
+			e.setAttribute('id', 'option' + id + ':'+ k);
+			if (k === 0) {
+				e.setAttribute('checked', '');
+			}
+			d.appendChild(e);
+			e = document.createElement('label');
+			e.setAttribute('for', 'option' + id + ':' + k);
+			e.appendChild(document.createTextNode(name));
+			d.appendChild(e);
+			});
+		}
+		f.appendChild(d);
+	});
+	container.appendChild(f);
+	document.getElementById('saveButton').removeAttribute('disabled');
+}
+
+function getBlockSelections() {
+	return blockTypes.map((v, n) => {
+		let selected = v.findIndex((_, k) => {
+			let option = document.getElementById('option' + n + ':' + k);
+			return option !== null && option.checked;
+		});
+		return (selected < 0) ? 10 * n : 10 * n + selected;
+	});
+}
+
+function getHeight(heightMap, reference) {
+	const yMax = (reference === undefined) ? 0 : heightMap.reduce((m, y) => (y > m) ? y : m, 0);
+	const refMax = (reference === undefined) ? 0 : reference.reduce((m, y) => (y > m) ? y : m, 0);
+	return 1 + Math.max(yMax, refMax);
+}
+
+function makeBlockArray(idMap, heightMap, reference, idRemap, width, height, length) {
+	const staircase = (reference !== undefined);
+	const rowFix = (staircase) ? 1 : 0;
+	const lengthFixed = (staircase) ? 1 + length : length;
+	const output = new Array(width * lengthFixed * height);
+	for (let x = 0; x < width; x++) {
+		if (staircase)	{ 
+			// z === 0
+			for (let y = 0; y < height; y++) {
+				let v = x + y * lengthFixed * width;
+				output[v] = (y !== reference[x]) ? -1 : -2;
+			}
+		}
+		for (let z = rowFix; z < lengthFixed; z++) {
+			for (let y = 0; y < height; y++) {
+				let u = x + z * width;
+				let v = u + y * lengthFixed * width;
+				let blockId = idMap[u];
+				output[v] = (staircase && y !== heightMap[u]) ? -1 : idRemap[blockId];
+				if (blockId === 12 && y > 0) {
+					output[v - lengthFixed * width] = 0; 
+					if (x > 0 && heightMap[u - 1] !== y) {
+						output[v - 1] = 0;
+					}
+					if (x + 1 < width && heightMap[u + 1] !== y) {
+						output[v + 1] = 0;
+					}
+					if (z > 0 && heightMap[u - width] !== y) {
+						output[v - width] = 0;
+					}
+					if (z + 1 < lengthFixed && heightMap[u + width] !== y) {
+						output[v + width] = 0;
+					}
+				}
+			}
+		}
+	}
+	return output;
+}
+
+function NBTFactory() {
+
+	function makeTag(code, name, payload) {
+		const r = {
+			'code': code,
+			'name': name
+		};
+		if (payload ===  undefined) {
+			r.children = [];			
+		}
+		else {
+			r.payload = payload;
+		}
+		return r;
+	};
+	
+	function codepointToUTF8Bytes(point) {
+		if (point < 0x80) {
+			return [point];
+		}
+		else if (point < 0x800) {
+			return [0xC0 + (point >> 6), 0x80 + (point % 0x40)];
+		}
+		else if (point < 0x10000) {
+			return [0xE0 + (point >> 12), 0x80 + ((point >> 6) % 0x40), 0x80 + (point % 0x40)];
+		}
+		else if (point < 0x11000) {
+			return [0xF0 + (point >> 18), 0x80 + ((point >> 12) % 0x40), 0x80 + ((point >> 6) % 0x40), 0x80 + (point % 0x40)];
+		}
+		else {
+			throw new Error('Attempt to encode non-UTF8 codepoint to UTF8.');
+		}
+		return [];
+	};
+	
+	function makeStringUTF8Bytes(s) {
+		return Array.apply(null, new Array(s.length)).map((_, n) => s.codePointAt(n)).flatMap(codepointToUTF8Bytes);
+	}
+	
+	function toByteArray(node) {
+		let tag = [node.code, node.name.length >> 8, node.name.length % 0x100];
+		tag = tag.concat(makeStringUTF8Bytes(node.name));
+		switch(node.code) {
+		case 1:
+			tag.push(node.payload);
+			break;
+		case 2:
+			tag = tag.concat([node.payload >> 8, node.payload % 0x100]);
+			break;
+		case 7:
+			tag = tag.concat([node.payload.length >> 24, (node.payload.length >> 16) % 0x100, (node.payload.length >> 8) % 0x100, node.payload.length % 0x100]);
+			tag = tag.concat(node.payload);
+			break;
+		case 8:
+			tag = tag.concat([node.payload.length >> 8, node.payload.length % 0x100]);
+			tag = tag.concat(makeStringUTF8Bytes(node.payload));
+			break;
+		case 10:
+			node.children.forEach(v => {
+				tag = tag.concat(toByteArray(v));
+			});
+			tag.push(0);
+			break;
+		default:
+			break;
+		}
+		return tag;
+	};
+
+	return {
+		'addChild': function(parent, child) {
+			parent.children.push(child);
+		},
+
+		'makeByte': function(name, payload) {
+			return makeTag(1, name, payload);
+		},
+		'makeShort': function(name, payload) {
+			return makeTag(2, name, payload);
+		},
+		'makeByteArray': function(name, payload) {
+			return makeTag(7, name, payload);
+		},
+		'makeString': function(name, payload) {
+			return makeTag(8, name, payload);
+		},
+		'makeCompound': function(name) {
+			return makeTag(10, name, undefined);
+		},
+		'toUrl': function(node) {
+			const bytes = gzipWrap(toByteArray(node));
+			const blob = new File([bytes], 'map.schematic', {'type': 'application/octet-stream'});
+			return URL.createObjectURL(blob);
+		}
+	};
+}
+
+function createNBTTagTree(width, height, length, reference, blockData, idRemap) {
+	const builder = NBTFactory();
+	const root = builder.makeCompound('Schematic');
+	builder.addChild(root, builder.makeShort('Width', width));
+	builder.addChild(root, builder.makeShort('Height', height));
+	const lengthFixed = (reference === undefined) ? length : length + 1;
+	builder.addChild(root, builder.makeShort('Length', lengthFixed));
+	builder.addChild(root, builder.makeString('Materials', 'Alpha'));
+	builder.addChild(root, builder.makeByteArray('Blocks', blockData));
+	builder.addChild(root, builder.makeByteArray('Data', Array.apply(null, new Uint8Array(blockData.length)).map(_ => 0)));	
+	const icon = builder.makeCompound('Icon');
+	builder.addChild(icon, builder.makeByte('Count', 1));
+	builder.addChild(icon, builder.makeString('id', 'book'));
+	builder.addChild(root, icon);	
+	const mapping = builder.makeCompound('SchematicaMapping');
+	if (reference !== undefined) {
+		builder.addChild(mapping, builder.makeShort('minecraft:bedrock', 2));
+	}
+	builder.addChild(mapping, builder.makeShort('minecraft:air', 1));
+	const shortNames = idRemap.reduce((acc, post, pre) => {
+		acc[pre] = schematicData.find(a => a.id === post).name;
+		return acc;
+	}, []);
+	idRemap.forEach((post, pre) => builder.addChild(mapping, builder.makeShort('minecraft:' + shortNames[pre], post)));
+	builder.addChild(root, mapping);
+	const mapping2 = builder.makeCompound('BlockIDs');
+	if (reference !== undefined) {
+		builder.addChild(mapping2, builder.makeString('2', 'minecraft:bedrock'));
+	}
+	builder.addChild(mapping2, builder.makeString('1', 'minecraft:air'));
+	idRemap.forEach((post, pre) => builder.addChild(mapping2, builder.makeString(post.toString(), 'minecraft:' + shortNames[pre])));
+	builder.addChild(root, mapping2);
+	return builder.toUrl(root);
+}
+
+function gzipWrap(bytes) {
+	const gzipPrefix = [0x1F, 0x8B, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF];
+	const uncompressedHeaderSize = 5;
+	const numBlocks = Math.ceil(bytes.length / 0xFFFF);
+	const suffixSize = 8;
+	const localBuffer = new ArrayBuffer(gzipPrefix.length + uncompressedHeaderSize * numBlocks + bytes.length + suffixSize);
+	const bufferView = new DataView(localBuffer);	
+	gzipPrefix.forEach((x, n) => {
+		bufferView.setUint8(n, x);
+	});
+	let targetPos = gzipPrefix.length;
+	let sourcePos = 0;
+	while (sourcePos < bytes.length) {
+		let remainingBytes = bytes.length - sourcePos;
+		let [nextHeader, toWrite] = (remainingBytes < 0xFFFF) ? [0x1, remainingBytes] :[0x0, 0xFFFF];
+		bufferView.setUint8(targetPos++, nextHeader);
+		bufferView.setUint16(targetPos, toWrite, true);
+		targetPos += 2;
+		bufferView.setUint16(targetPos, toWrite ^ 0xFFFF, true);
+		targetPos += 2;
+		for (let k = 0; k < toWrite; k++) {
+			bufferView.setUint8(targetPos++, bytes[sourcePos++])
+		}
+	}
+	bufferView.setUint32(targetPos, crc32(bytes), true);
+	targetPos += 4;
+	bufferView.setUint32(targetPos, bytes.length & 0xFFFFFFFF, true);
+	return localBuffer;
+}
+
+function precalc(n) {
+	const magic = 0xEDB88320;
+	for (let k = 0; k < 8; k++) {
+		n = (n & 1 > 0) ? magic ^ (n >>> 1) : n >>> 1;
+	}
+	return  n;
+}
+
+const crcLookup =  Array.apply(null, new Uint32Array(256)).map((_, n) => precalc(n));
+
+function crcStage(rem, dat) {
+	rem = (rem >>> 8) ^ crcLookup[(rem & 0xFF) ^ dat];
+	return rem;
+}
+
+function crc32(bytes) {
+	return bytes.reduce(crcStage, 0xFFFFFFFF) ^ 0xFFFFFFFF;
+}
+
+function createSchematic(button) {
+	const idRemap = getBlockSelections();
+	const height = getHeight(output.heights, output.exterior);
+	const denseIds = makeBlockArray(output.ids, output.heights, output.exterior, idRemap, output.width, height, output.length);
+	const fileURL = createNBTTagTree(output.width, height, output.length, output.exterior, denseIds, idRemap);
+	const a = document.createElement('a');
+	a.href = fileURL;
+	a.download = 'map.schematic';
+	document.body.appendChild(a);
+	a.click()
+	setTimeout(() => {
+		URL.revokeObjectURL(fileURL)
+		document.body.removeChild(a);
+		}, 0);
+}
+
+function onLoad() {
+	createPalette();
+	fixCanvases();
+}
+
+document.addEventListener('DOMContentLoaded', onLoad);
+
+</script>
+</head>
+<body>
+<div id='centerer'>
+<div id='palette'>
+	<div class='swatch' id='color-1' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-2' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-3' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-4' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-5' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-6' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-7' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-8' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-9' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-10' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-11' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-12' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-13' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-14' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-15' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-16' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-17' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-18' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-19' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-20' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-21' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-22' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-23' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-24' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-25' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-26' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-27' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-28' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-29' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-30' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-31' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-32' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-33' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-34' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-35' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-36' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-37' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-38' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-39' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-40' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-41' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-42' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-43' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-44' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-45' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-46' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-47' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-48' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-49' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-50' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+	<div class='swatch' id='color-51' onclick='clickSwatch(this)' onmouseenter='previewSwatchBlocks(this)' onmouseleave='clearBlocks()'></div>
+</div>
+<div id='blockPreview'>
+</div>
+<div id='options'>
+	<div class='suboptions'>
+	<input type='checkBox' id='paletteOverride'>
+	<label for='paletteOverride'>Use all colors.</label>
+	</div>
+	<div class='suboptions'>	
+	<input type='radio' name='buildMethod' id='flatMethod' checked>
+	<label for='flatMethod'>Flat</label>
+	<input type='radio' name='buildMethod' id='stairMethod'>
+	<label for='flatMethod'>Staircase</label>
+	</div>
+	<div class='suboptions'>
+	<input type='checkBox' id='enableDithering' checked>
+	<label for='enableDithering'>Dither output.</label>
+	</div>
+	<div class='suboptions'>
+	<input type='checkBox' id='colorSpace' checked>
+	<label for='colorSpace'>Match using chromaticity-lightness.</label>
+	</div>
+</div>
+<div id='imageContainer'>
+	<canvas id='sourceImage'></canvas>
+	<canvas id='previewImage'><div>Your browser does not support rendering canvas elements.</div></canvas>
+	<div>
+		<input id='fileSelector' type='file' accept='image/*' onchange='loadImage(this.files)'>
+		<button onclick="document.getElementById('fileSelector').click();">Select Image</button>		
+		<label for='targetSize'>Short Side</label>
+		<input type='number' min='1' max='10' id='targetSize' value='1' cols='2' onchange='refreshPreview()' disabled>
+		<button id='createButton' onclick='createOutput()' disabled>Compute</button>
+		<button id='saveButton' onclick='createSchematic(this)' disabled>Save Schematic</button>
+	</div>
+	<canvas id='targetImage'></canvas>
+</div>
+<div id='statsContainer'>
+</div>
+<div id='textContainer'>
+</div>
+</div>
+</body>
+</html
